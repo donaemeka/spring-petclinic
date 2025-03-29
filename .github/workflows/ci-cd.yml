@@ -1,0 +1,67 @@
+name: Java CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # CI PHASE - BUILD AND TEST
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - run: chmod +x mvnw
+      - run: ./mvnw clean verify
+
+      - name: SonarQube Scan
+        if: github.ref == 'refs/heads/main'
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        run: |
+          ./mvnw sonar:sonar \
+            -Dsonar.projectKey=Spring-PetClinic \
+            -Dsonar.projectName='Spring-PetClinic'
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: petclinic-jar
+          path: target/spring-petclinic-*.jar
+
+  # CD PHASE - DEPLOYMENT
+  deploy-to-ec2:
+    needs: build-and-test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: petclinic-jar
+          path: target/
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh/
+          echo "${{ secrets.EC2_PRIVATE_KEY }}" > ~/.ssh/ec2_key
+          chmod 600 ~/.ssh/ec2_key
+          echo "${{ secrets.EC2_HOST }} ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBB..." >> ~/.ssh/known_hosts
+
+      - name: Deploy to EC2
+        run: |
+          scp -i ~/.ssh/ec2_key -o StrictHostKeyChecking=no target/*.jar ubuntu@${{ secrets.EC2_HOST }}:/home/ubuntu/
+          ssh -i ~/.ssh/ec2_key ubuntu@${{ secrets.EC2_HOST }} << 'EOF'
+          pkill -f "java -jar spring-petclinic" || true
+          nohup java -jar /home/ubuntu/spring-petclinic-*.jar > /home/ubuntu/app.log 2>&1 &
+          EOF
